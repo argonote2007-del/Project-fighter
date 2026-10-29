@@ -1,0 +1,1424 @@
+
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>PROJECT FIGHTER v0.6</title>
+<style>
+*{box-sizing:border-box}
+html,body{
+ margin:0;width:100%;height:100%;overflow:hidden;
+ background:#080b13;color:white;font-family:Arial,sans-serif;
+ touch-action:none
+}
+#game{display:block;width:100vw;height:100dvh}
+#loader{
+ position:fixed;top:7px;left:7px;z-index:20;
+ background:#101624ed;border:1px solid #ffffff44;
+ border-radius:8px;padding:8px;width:205px;font-size:11px
+}
+#loaderTitle{font-weight:bold;margin-bottom:5px}
+#status{line-height:1.4;overflow-wrap:anywhere}
+#file{display:none}
+#loadBtn,#restart{
+ padding:7px 9px;color:white;background:#34445e;
+ border:1px solid #ffffff66;border-radius:7px;margin-top:6px
+}
+#restart{position:fixed;top:7px;right:7px;z-index:20;margin:0}
+#controls{
+ position:fixed;left:0;bottom:10px;width:100%;
+ padding:0 8px;display:flex;justify-content:space-between;
+ gap:6px;z-index:10;pointer-events:none
+}
+.group{display:flex;gap:4px;pointer-events:auto}
+.control{
+ width:47px;height:52px;padding:2px;
+ border:1px solid #ffffff77;border-radius:9px;
+ background:#26344cdb;color:white;font-size:10px;font-weight:bold;
+ touch-action:none;user-select:none;-webkit-user-select:none;
+ -webkit-touch-callout:none
+}
+.attack{background:#84394d}
+.special{background:#63213f;border-color:#ff789a}
+.control.pressed{background:#ed738b;transform:scale(.96)}
+@media(max-width:650px){
+ .control{width:39px;height:47px;font-size:9px}
+ #loader{width:180px}
+}
+</style>
+</head>
+<body>
+
+<canvas id="game"></canvas>
+
+<div id="loader">
+ <div id="loaderTitle">PROJECT FIGHTER v0.6</div>
+ <div id="status">NOX 자동 로딩 준비 중...</div>
+ <button id="loadBtn">NOX 이미지 선택</button>
+ <input id="file" type="file" accept="image/*">
+</div>
+
+<button id="restart">RESTART</button>
+
+<div id="controls">
+ <div class="group">
+  <button class="control" data-key="left">◀</button>
+  <button class="control" data-key="right">▶</button>
+  <button class="control" data-key="jump">JUMP</button>
+  <button class="control" data-key="down">DOWN</button>
+ </div>
+ <div class="group">
+  <button class="control" data-key="guard">GUARD</button>
+  <button class="control attack" data-key="light">LIGHT</button>
+  <button class="control attack" data-key="heavy">HEAVY</button>
+  <button class="control special" data-key="moon">MOON</button>
+ </div>
+</div>
+
+<script>
+"use strict";
+
+// =====================================
+// 기본 설정
+// =====================================
+
+const canvas=document.getElementById("game");
+const ctx=canvas.getContext("2d");
+
+const statusEl=document.getElementById("status");
+const fileInput=document.getElementById("file");
+const loadBtn=document.getElementById("loadBtn");
+
+const W=960,H=540,FLOOR=390,GRAVITY=1450;
+
+function resize(){
+ const dpr=Math.min(devicePixelRatio||1,2);
+ canvas.width=Math.round(innerWidth*dpr);
+ canvas.height=Math.round(innerHeight*dpr);
+}
+addEventListener("resize",resize);
+resize();
+
+function random(a,b){
+ return a+Math.random()*(b-a);
+}
+
+// =====================================
+// NOX 자동 로딩 — v0.5 저장소 호환
+// =====================================
+
+let noxImage=null;
+let noxLoaded=false;
+let imageObjectURL=null;
+let imageVersion=0;
+
+function setStatus(message){
+ statusEl.textContent=message;
+}
+
+function applyNox(source,label){
+ const version=++imageVersion;
+ const img=new Image();
+
+ setStatus(label+" 불러오는 중...");
+
+ img.onload=function(){
+  if(version!==imageVersion)return;
+
+  if(img.naturalWidth<6||img.naturalHeight<4){
+   setStatus("이미지 크기가 너무 작습니다.");
+   return;
+  }
+
+  noxImage=img;
+  noxLoaded=true;
+
+  setStatus(
+   "NOX READY · "+
+   img.naturalWidth+" × "+img.naturalHeight
+  );
+ };
+
+ img.onerror=function(){
+  if(version!==imageVersion)return;
+  setStatus("자동 연결 실패. 이미지를 직접 선택해 주세요.");
+ };
+
+ img.src=source;
+}
+
+const DB_NAME="PROJECT_FIGHTER_NOX";
+const STORE_NAME="assets";
+
+function openDB(){
+ return new Promise((resolve,reject)=>{
+  if(!window.indexedDB){
+   reject(new Error("IndexedDB 미지원"));
+   return;
+  }
+
+  const req=indexedDB.open(DB_NAME,1);
+
+  req.onupgradeneeded=function(){
+   const db=req.result;
+   if(!db.objectStoreNames.contains(STORE_NAME)){
+    db.createObjectStore(STORE_NAME);
+   }
+  };
+
+  req.onsuccess=()=>resolve(req.result);
+  req.onerror=()=>reject(req.error);
+ });
+}
+
+async function saveImage(file){
+ const db=await openDB();
+
+ return new Promise((resolve,reject)=>{
+  const tx=db.transaction(STORE_NAME,"readwrite");
+  tx.objectStore(STORE_NAME).put(file,"nox");
+
+  tx.oncomplete=()=>{
+   db.close();
+   resolve();
+  };
+
+  tx.onerror=()=>{
+   db.close();
+   reject(tx.error);
+  };
+ });
+}
+
+async function readSavedImage(){
+ const db=await openDB();
+
+ return new Promise((resolve,reject)=>{
+  const tx=db.transaction(STORE_NAME,"readonly");
+  const req=tx.objectStore(STORE_NAME).get("nox");
+
+  req.onsuccess=()=>{
+   const result=req.result;
+   db.close();
+   resolve(result);
+  };
+
+  req.onerror=()=>{
+   db.close();
+   reject(req.error);
+  };
+ });
+}
+
+function useBlob(blob,label){
+ const url=URL.createObjectURL(blob);
+ const oldURL=imageObjectURL;
+
+ imageObjectURL=url;
+ applyNox(url,label);
+
+ if(oldURL){
+  setTimeout(()=>URL.revokeObjectURL(oldURL),1000);
+ }
+}
+
+loadBtn.onclick=function(){
+ fileInput.value="";
+ fileInput.click();
+};
+
+fileInput.onchange=async function(){
+ const file=fileInput.files[0];
+ if(!file)return;
+
+ useBlob(file,"선택한 NOX");
+
+ try{
+  await saveImage(file);
+ }catch(error){
+  console.log("이미지 저장 불가:",error);
+ }
+};
+
+async function autoLoadNox(){
+ try{
+  const saved=await readSavedImage();
+
+  if(saved){
+   useBlob(saved,"저장된 NOX");
+   return;
+  }
+ }catch(error){
+  console.log("저장 이미지 확인 실패:",error);
+ }
+
+ applyNox("./nox.png","폴더의 NOX");
+}
+
+autoLoadNox();
+
+// =====================================
+// 기존 6 × 4 스프라이트
+// =====================================
+
+const ANIM={
+ idle:   {row:0,start:0,count:6,fps:7,loop:true},
+ forward:{row:1,start:0,count:3,fps:9,loop:true},
+ backward:{row:1,start:3,count:3,fps:9,loop:true},
+ light:  {row:2,start:0,count:3,fps:12,loop:false},
+ heavy:  {row:2,start:3,count:3,fps:8,loop:false},
+ guard:  {row:3,start:0,count:2,fps:4,loop:true},
+ crouch: {row:3,start:2,count:2,fps:4,loop:true},
+ hurt:   {row:3,start:4,count:2,fps:8,loop:false}
+};
+
+// =====================================
+// 전투 데이터
+// =====================================
+
+function makeFighter(x,color,isCPU){
+ return {
+  x,y:FLOOR,vy:0,hp:100,color,isCPU,
+  facing:isCPU?-1:1,
+  speed:235,
+  anim:"idle",animTime:0,
+  attack:null,attackTime:0,hitDone:false,
+  stun:0,guard:false,crouch:false,
+  flash:0,knockback:0,attackTrail:0,
+  moonCooldown:0
+ };
+}
+
+const ATTACKS={
+ light:{
+  duration:.29,active:.075,damage:7,
+  range:105,stun:.18,knockback:150,
+  hitstop:.055
+ },
+ heavy:{
+  duration:.51,active:.17,damage:14,
+  range:140,stun:.29,knockback:330,
+  hitstop:.105
+ }
+};
+
+const MOON={
+ startup:.24,
+ recovery:.39,
+ cooldown:2.5,
+ speed:570,
+ maxDistance:370,
+ damage:12,
+ guardDamage:2,
+ stun:.28,
+ knockback:260,
+ radiusX:34,
+ radiusY:45
+};
+
+let player,cpu;
+let gameOver=false,winner="",cpuTimer=0;
+
+// =====================================
+// 전투 이펙트
+// =====================================
+
+let particles=[];
+let projectiles=[];
+let hitstop=0;
+let shake=0;
+let impactFlash=0;
+
+function spawnImpact(x,y,heavy,blocked){
+
+ const count=blocked?9:heavy?22:13;
+
+ const colors=blocked
+  ?["#80d8ff","#ffffff","#6c91ff"]
+  :heavy
+   ?["#ff315b","#a50c35","#ffb2bd"]
+   :["#ffffff","#ffb28a","#f16b74"];
+
+ for(let i=0;i<count;i++){
+
+  const angle=random(0,Math.PI*2);
+  const speed=random(90,heavy?360:250);
+  const life=random(.13,.32);
+
+  particles.push({
+   x,y,
+   vx:Math.cos(angle)*speed,
+   vy:Math.sin(angle)*speed,
+   life,maxLife:life,
+   size:random(2,heavy?7:5),
+   color:colors[Math.floor(Math.random()*colors.length)]
+  });
+ }
+
+ particles.push({
+  x,y,vx:0,vy:0,
+  life:heavy?.22:.16,
+  maxLife:heavy?.22:.16,
+  size:heavy?15:10,
+  color:blocked?"#80d8ff":heavy?"#e63a64":"#ffffff",
+  ring:true,
+  growth:heavy?290:190
+ });
+}
+
+function spawnMoonParticles(x,y,count){
+
+ for(let i=0;i<count;i++){
+  const life=random(.13,.35);
+
+  particles.push({
+   x,y,
+   vx:random(-120,120),
+   vy:random(-100,100),
+   life,maxLife:life,
+   size:random(2,5),
+   color:Math.random()<.5?"#ff436c":"#750c35"
+  });
+ }
+}
+
+function updateEffects(dt){
+
+ for(const p of particles){
+  p.life-=dt;
+  p.x+=p.vx*dt;
+  p.y+=p.vy*dt;
+
+  if(!p.ring)p.vy+=180*dt;
+ }
+
+ particles=particles.filter(p=>p.life>0);
+
+ shake=Math.max(0,shake-dt*45);
+ impactFlash=Math.max(0,impactFlash-dt*4);
+
+ for(const f of [player,cpu]){
+  f.flash=Math.max(0,f.flash-dt);
+  f.attackTrail=Math.max(0,f.attackTrail-dt);
+ }
+}
+
+function drawEffects(){
+
+ for(const p of particles){
+
+  const alpha=Math.max(0,p.life/p.maxLife);
+
+  ctx.save();
+  ctx.globalAlpha=alpha;
+  ctx.strokeStyle=p.color;
+  ctx.fillStyle=p.color;
+
+  if(p.ring){
+   const progress=1-alpha;
+   const radius=p.size+progress*p.growth;
+
+   ctx.lineWidth=3;
+   ctx.beginPath();
+   ctx.arc(p.x,p.y,radius,0,Math.PI*2);
+   ctx.stroke();
+  }else{
+   ctx.beginPath();
+   ctx.arc(p.x,p.y,p.size*alpha,0,Math.PI*2);
+   ctx.fill();
+  }
+
+  ctx.restore();
+ }
+}
+
+// =====================================
+// 잔월 — 발사 및 판정
+// =====================================
+
+function startMoon(f){
+
+ if(
+  gameOver ||
+  f.attack ||
+  f.stun>0 ||
+  f.moonCooldown>0 ||
+  f.y<FLOOR
+ )return;
+
+ f.attack="moon";
+ f.attackTime=0;
+ f.hitDone=false;
+ f.moonCooldown=MOON.cooldown;
+
+ // 기존 HEAVY 모션을 임시 재활용
+ // 새 스프라이트가 없어도 작동
+ setAnim(f,"heavy");
+
+ spawnMoonParticles(
+  f.x+f.facing*30,
+  f.y-100,
+  9
+ );
+}
+
+function fireMoon(f){
+
+ projectiles.push({
+  x:f.x+f.facing*58,
+  y:f.y-96,
+  dir:f.facing,
+  owner:f,
+  traveled:0,
+  alive:true,
+  age:0
+ });
+
+ spawnMoonParticles(
+  f.x+f.facing*58,
+  f.y-96,
+  12
+ );
+}
+
+function updateProjectiles(dt){
+
+ for(const p of projectiles){
+
+  if(!p.alive)continue;
+
+  const oldX=p.x;
+
+  const movement=p.dir*MOON.speed*dt;
+
+  p.x+=movement;
+  p.traveled+=Math.abs(movement);
+  p.age+=dt;
+
+  // 잔월 궤적
+  if(Math.random()<.8){
+   spawnMoonParticles(
+    p.x-p.dir*16,
+    p.y+random(-16,16),
+    1
+   );
+  }
+
+  const target=p.owner===player?cpu:player;
+
+  // 이동 경로와 상대의 피격 범위가 겹치는지 확인
+  const minX=Math.min(oldX,p.x)-MOON.radiusX;
+  const maxX=Math.max(oldX,p.x)+MOON.radiusX;
+
+  const overlapsX=
+   target.x+22>=minX &&
+   target.x-22<=maxX;
+
+  const overlapsY=
+   Math.abs((target.y-90)-p.y)<MOON.radiusY+45;
+
+  if(
+   overlapsX &&
+   overlapsY &&
+   target.hp>0
+  ){
+
+   p.alive=false;
+   applyMoonHit(p,target);
+  }
+
+  if(p.traveled>=MOON.maxDistance){
+   p.alive=false;
+   spawnMoonParticles(p.x,p.y,5);
+  }
+
+  if(p.x<-80||p.x>W+80){
+   p.alive=false;
+  }
+ }
+
+ projectiles=projectiles.filter(p=>p.alive);
+}
+
+function applyMoonHit(p,target){
+
+ const blocked=
+  target.guard &&
+  target.stun<=0 &&
+  target.facing===-p.dir;
+
+ const damage=blocked
+  ?MOON.guardDamage
+  :MOON.damage;
+
+ target.hp=Math.max(0,target.hp-damage);
+
+ spawnImpact(p.x,p.y,true,blocked);
+ spawnMoonParticles(p.x,p.y,20);
+
+ hitstop=blocked?.045:.095;
+ shake=blocked?3:9;
+ impactFlash=blocked?.04:.11;
+ target.flash=blocked?.07:.16;
+
+ if(blocked){
+
+  target.knockback=p.dir*75;
+
+ }else{
+
+  target.stun=MOON.stun;
+  target.attack=null;
+  target.attackTime=0;
+  target.knockback=p.dir*MOON.knockback;
+
+  setAnim(target,"hurt");
+ }
+
+ if(target.hp<=0){
+  gameOver=true;
+  winner=p.owner===player?"NOX WINS":"CPU WINS";
+ }
+}
+
+// =====================================
+// 입력 시스템
+// =====================================
+
+const keyboardHeld=new Set();
+const touchPointers=new Map();
+
+function isHeld(key){
+
+ if(keyboardHeld.has(key))return true;
+
+ for(const value of touchPointers.values()){
+  if(value===key)return true;
+ }
+
+ return false;
+}
+
+function pressAction(key){
+
+ if(gameOver)return;
+
+ if(key==="jump"){
+
+  if(
+   player.y>=FLOOR &&
+   player.stun<=0 &&
+   !player.attack &&
+   !player.guard &&
+   !player.crouch
+  ){
+   player.vy=-760;
+player.y=FLOOR-1;
+  }
+ }
+
+ if(key==="light")startAttack(player,"light");
+ if(key==="heavy")startAttack(player,"heavy");
+ if(key==="moon")startMoon(player);
+}
+
+document.querySelectorAll(".control").forEach(btn=>{
+
+ const key=btn.dataset.key;
+
+ btn.addEventListener("pointerdown",e=>{
+
+  e.preventDefault();
+
+  if(touchPointers.has(e.pointerId))return;
+
+  const alreadyHeld=isHeld(key);
+
+  touchPointers.set(e.pointerId,key);
+
+  try{
+   btn.setPointerCapture(e.pointerId);
+  }catch(error){}
+
+  btn.classList.add("pressed");
+
+  if(!alreadyHeld)pressAction(key);
+ });
+
+ function release(e){
+
+  if(touchPointers.get(e.pointerId)!==key)return;
+
+  touchPointers.delete(e.pointerId);
+  btn.classList.toggle("pressed",isHeld(key));
+ }
+
+ btn.addEventListener("pointerup",release);
+ btn.addEventListener("pointercancel",release);
+ btn.addEventListener("lostpointercapture",release);
+});
+
+const keyMap={
+ a:"left",d:"right",w:"jump",s:"down",
+ j:"light",k:"heavy",l:"guard",u:"moon",
+ arrowleft:"left",arrowright:"right",
+ arrowup:"jump",arrowdown:"down"
+};
+
+addEventListener("keydown",e=>{
+
+ const name=e.key.toLowerCase();
+
+ if(name==="r"&&!e.repeat){
+  resetGame();
+  return;
+ }
+
+ const key=keyMap[name];
+ if(!key)return;
+
+ e.preventDefault();
+
+ if(e.repeat||keyboardHeld.has(key))return;
+
+ const alreadyHeld=isHeld(key);
+
+ keyboardHeld.add(key);
+
+ if(!alreadyHeld)pressAction(key);
+});
+
+addEventListener("keyup",e=>{
+
+ const key=keyMap[e.key.toLowerCase()];
+ if(!key)return;
+
+ e.preventDefault();
+ keyboardHeld.delete(key);
+});
+
+function clearInputs(){
+
+ keyboardHeld.clear();
+ touchPointers.clear();
+
+ document.querySelectorAll(".control").forEach(btn=>{
+  btn.classList.remove("pressed");
+ });
+}
+
+addEventListener("blur",clearInputs);
+
+document.addEventListener("visibilitychange",()=>{
+ if(document.hidden)clearInputs();
+});
+
+// =====================================
+// 일반 전투
+// =====================================
+
+function resetGame(){
+
+ clearInputs();
+
+ player=makeFighter(260,"#579dff",false);
+ cpu=makeFighter(700,"#e45d70",true);
+
+ gameOver=false;
+ winner="";
+ cpuTimer=0;
+
+ particles=[];
+ projectiles=[];
+ hitstop=0;
+ shake=0;
+ impactFlash=0;
+}
+
+function setAnim(f,name){
+
+ if(f.anim!==name){
+  f.anim=name;
+  f.animTime=0;
+ }
+}
+
+function startAttack(f,type){
+
+ if(gameOver||f.attack||f.stun>0)return;
+
+ f.attack=type;
+ f.attackTime=0;
+ f.hitDone=false;
+ f.attackTrail=0;
+
+ setAnim(f,type);
+}
+
+function applyHit(attacker,target,data){
+
+ const distance=Math.abs(attacker.x-target.x);
+ const inFront=(target.x-attacker.x)*attacker.facing>0;
+
+ if(
+  distance>data.range ||
+  !inFront ||
+  Math.abs(attacker.y-target.y)>95
+ )return;
+
+ const blocked=target.guard&&target.stun<=0;
+ const heavy=attacker.attack==="heavy";
+
+ target.hp=Math.max(
+  0,
+  target.hp-(blocked?1:data.damage)
+ );
+
+ const impactX=target.x-attacker.facing*18;
+ const impactY=target.y-90;
+
+ spawnImpact(impactX,impactY,heavy,blocked);
+
+ hitstop=blocked?.035:data.hitstop;
+ shake=blocked?2:heavy?10:5;
+ impactFlash=blocked?.035:heavy?.12:.055;
+
+ target.flash=blocked?.06:heavy?.17:.10;
+
+ if(blocked){
+
+  target.knockback=attacker.facing*65;
+
+ }else{
+
+  target.stun=data.stun;
+  target.attack=null;
+  target.attackTime=0;
+  target.knockback=attacker.facing*data.knockback;
+
+  setAnim(target,"hurt");
+ }
+
+ if(target.hp<=0){
+  gameOver=true;
+  winner=attacker===player?"NOX WINS":"CPU WINS";
+ }
+}
+
+function updateFighter(f,dt){
+
+ f.animTime+=dt;
+
+ const other=f===player?cpu:player;
+ f.facing=f.x<other.x?1:-1;
+
+ f.moonCooldown=Math.max(0,f.moonCooldown-dt);
+
+ if(f.stun>0){
+  f.stun=Math.max(0,f.stun-dt);
+  setAnim(f,"hurt");
+ }
+
+ if(f.attack){
+
+  f.attackTime+=dt;
+
+  if(f.attack==="moon"){
+
+   // 발동 시간에 도달하면 정확히 한 번 발사
+   if(
+    !f.hitDone &&
+    f.attackTime>=MOON.startup
+   ){
+    f.hitDone=true;
+    fireMoon(f);
+   }
+
+   if(
+    f.attack &&
+    f.attackTime>=MOON.startup+MOON.recovery
+   ){
+    f.attack=null;
+    f.attackTime=0;
+   }
+
+  }else{
+
+   const data=ATTACKS[f.attack];
+
+   if(
+    f.attackTime>=data.active*.65 &&
+    f.attackTime<=data.active+.09
+   ){
+    f.attackTrail=.075;
+   }
+
+   if(!f.hitDone&&f.attackTime>=data.active){
+
+    f.hitDone=true;
+    applyHit(f,other,data);
+   }
+
+   if(f.attack&&f.attackTime>=data.duration){
+    f.attack=null;
+    f.attackTime=0;
+   }
+  }
+ }
+
+ f.x+=f.knockback*dt;
+ f.knockback*=Math.exp(-11*dt);
+
+ if(Math.abs(f.knockback)<1){
+  f.knockback=0;
+ }
+
+ f.vy+=GRAVITY*dt;
+ f.y+=f.vy*dt;
+
+ if(f.y>=FLOOR){
+  f.y=FLOOR;
+  f.vy=0;
+ }
+
+ f.x=Math.max(45,Math.min(W-45,f.x));
+}
+
+function updatePlayer(dt){
+
+ player.guard=
+  isHeld("guard") &&
+  !player.attack &&
+  player.stun<=0;
+
+ player.crouch=
+  isHeld("down") &&
+  !player.attack &&
+  player.stun<=0;
+
+ if(player.stun>0||player.attack)return;
+
+ let move=0;
+
+ if(isHeld("left"))move--;
+ if(isHeld("right"))move++;
+
+ if(!player.guard&&!player.crouch){
+
+  // 공중에서는 더 빠르게 수평 이동
+  const airborne=player.y<FLOOR;
+
+  const moveSpeed=airborne
+    ?340
+    :player.speed;
+
+  player.x+=move*moveSpeed*dt;
+}
+ if(player.guard){
+  setAnim(player,"guard");
+ }else if(player.crouch){
+  setAnim(player,"crouch");
+ }else if(move!==0){
+  setAnim(
+   player,
+   move===player.facing?"forward":"backward"
+  );
+ }else{
+  setAnim(player,"idle");
+ }
+}
+
+function updateCPU(dt){
+
+ if(cpu.stun>0||cpu.attack)return;
+
+ cpuTimer-=dt;
+
+ const distance=Math.abs(cpu.x-player.x);
+
+ // 잔월에 대한 간단한 방어 반응
+ const incoming=projectiles.some(p=>
+  p.owner===player &&
+  p.alive &&
+  (cpu.x-p.x)*p.dir>0 &&
+  Math.abs(cpu.x-p.x)<175
+ );
+
+ cpu.guard=incoming;
+
+ if(incoming){
+  setAnim(cpu,"guard");
+  return;
+ }
+
+ if(distance>115){
+
+  cpu.x+=cpu.facing*cpu.speed*.58*dt;
+  setAnim(cpu,"forward");
+
+ }else{
+
+  setAnim(cpu,"idle");
+
+  if(cpuTimer<=0){
+
+   startAttack(
+    cpu,
+    Math.random()<.72?"light":"heavy"
+   );
+
+   cpuTimer=.7+Math.random()*.7;
+  }
+ }
+}
+
+function update(dt){
+
+ if(hitstop>0){
+
+  hitstop=Math.max(0,hitstop-dt);
+  updateEffects(dt);
+  return;
+ }
+
+ updateEffects(dt);
+
+ if(gameOver)return;
+
+ updatePlayer(dt);
+ updateCPU(dt);
+
+ updateFighter(player,dt);
+ updateFighter(cpu,dt);
+
+ updateProjectiles(dt);
+
+ const dx=cpu.x-player.x;
+
+ if(
+  Math.abs(dx)<62 &&
+  Math.abs(player.y-cpu.y)<65 &&
+  player.y>=FLOOR-12 &&
+  cpu.y>=FLOOR-12
+){
+
+  const push=(62-Math.abs(dx))/2;
+  const direction=Math.sign(dx)||1;
+
+  player.x-=direction*push;
+  cpu.x+=direction*push;
+ }
+}
+
+// =====================================
+// 화면 출력
+// =====================================
+
+function drawBackground(){
+
+ const gradient=ctx.createLinearGradient(0,0,0,H);
+
+ gradient.addColorStop(0,"#111525");
+ gradient.addColorStop(1,"#303449");
+
+ ctx.fillStyle=gradient;
+ ctx.fillRect(0,0,W,H);
+
+ ctx.fillStyle="#191c2b";
+
+ for(let i=0;i<12;i++){
+  const height=45+(i*37)%100;
+  ctx.fillRect(i*88,FLOOR-height,75,height);
+ }
+
+ ctx.fillStyle="#151923";
+ ctx.fillRect(0,FLOOR,W,H-FLOOR);
+
+ ctx.fillStyle="#945361";
+ ctx.fillRect(0,FLOOR,W,3);
+}
+
+function drawNox(f){
+
+ if(!noxLoaded||!noxImage)return;
+
+ const anim=ANIM[f.anim]||ANIM.idle;
+ const rawFrame=Math.floor(f.animTime*anim.fps);
+
+ const frame=anim.loop
+  ?rawFrame%anim.count
+  :Math.min(rawFrame,anim.count-1);
+
+ const column=anim.start+frame;
+
+ const sourceW=noxImage.naturalWidth/6;
+ const sourceH=noxImage.naturalHeight/4;
+
+ ctx.save();
+
+ ctx.translate(f.x,f.y);
+
+ if(f.facing===-1){
+  ctx.scale(-1,1);
+ }
+
+ ctx.imageSmoothingEnabled=true;
+
+ if(f.flash>0){
+  ctx.globalAlpha=.58;
+ }
+
+ ctx.drawImage(
+  noxImage,
+  column*sourceW,
+  anim.row*sourceH,
+  sourceW,
+  sourceH,
+  -85,-210,170,210
+ );
+
+ ctx.restore();
+}
+
+function drawPlaceholder(f){
+
+ ctx.save();
+
+ ctx.translate(f.x,f.y);
+ ctx.scale(f.facing,1);
+
+ if(f.flash>0)ctx.globalAlpha=.55;
+
+ ctx.fillStyle=f.color;
+ ctx.fillRect(-22,-105,44,72);
+ ctx.fillRect(-20,-33,17,33);
+ ctx.fillRect(4,-33,17,33);
+
+ ctx.fillStyle="#e6d5c9";
+ ctx.fillRect(-16,-139,32,34);
+
+ ctx.fillStyle="#171923";
+ ctx.fillRect(-18,-145,36,14);
+
+ if(f.attack){
+  ctx.fillStyle="white";
+  ctx.fillRect(20,-90,45,13);
+ }
+
+ ctx.restore();
+}
+
+function drawAttackTrail(f){
+
+ if(f.attackTrail<=0||!f.attack)return;
+
+ const heavy=f.attack==="heavy";
+ const alpha=f.attackTrail/.075;
+
+ ctx.save();
+
+ ctx.translate(f.x,f.y);
+ ctx.scale(f.facing,1);
+ ctx.globalAlpha=alpha;
+
+ const gradient=ctx.createLinearGradient(15,-105,155,-65);
+
+ if(f===player){
+  gradient.addColorStop(0,"#5d092500");
+  gradient.addColorStop(.5,heavy?"#a50c35":"#f75b76");
+  gradient.addColorStop(1,heavy?"#ff8ba4":"#ffffff");
+ }else{
+  gradient.addColorStop(0,"#ffffff00");
+  gradient.addColorStop(1,"#ffac82");
+ }
+
+ ctx.strokeStyle=gradient;
+ ctx.lineWidth=heavy?17:9;
+ ctx.lineCap="round";
+
+ ctx.beginPath();
+ ctx.moveTo(22,-102);
+ ctx.quadraticCurveTo(
+  heavy?88:65,
+  heavy?-145:-115,
+  heavy?150:110,
+  heavy?-66:-84
+ );
+ ctx.stroke();
+
+ ctx.restore();
+}
+
+function drawFighter(f){
+
+ ctx.fillStyle="#0008";
+ ctx.beginPath();
+ ctx.ellipse(f.x,FLOOR+5,38,7,0,0,Math.PI*2);
+ ctx.fill();
+
+ if(f===player&&noxLoaded){
+  drawNox(f);
+ }else{
+  drawPlaceholder(f);
+ }
+
+ drawAttackTrail(f);
+
+ // 잔월 발동 중 팔 주변 저주 에너지
+ if(f.attack==="moon"){
+
+  ctx.save();
+
+  const progress=Math.min(
+   1,
+   f.attackTime/MOON.startup
+  );
+
+  ctx.globalAlpha=.25+progress*.5;
+  ctx.strokeStyle="#e43c69";
+  ctx.lineWidth=3+progress*5;
+  ctx.shadowColor="#ff315b";
+  ctx.shadowBlur=20;
+
+  ctx.beginPath();
+  ctx.arc(
+   f.x+f.facing*27,
+   f.y-105,
+   13+progress*22,
+   -.9,
+   1.9
+  );
+  ctx.stroke();
+
+  ctx.restore();
+ }
+}
+
+// =====================================
+// 잔월 시각 효과
+// =====================================
+
+function drawMoonProjectile(p){
+
+ ctx.save();
+
+ ctx.translate(p.x,p.y);
+ ctx.scale(p.dir,1);
+
+ const pulse=1+Math.sin(p.age*25)*.07;
+
+ ctx.scale(pulse,pulse);
+
+ ctx.shadowColor="#ff315b";
+ ctx.shadowBlur=23;
+
+ // 외곽 초승달
+ ctx.strokeStyle="#6b082a";
+ ctx.lineWidth=22;
+ ctx.lineCap="round";
+
+ ctx.beginPath();
+ ctx.moveTo(-25,-39);
+ ctx.quadraticCurveTo(35,0,-25,39);
+ ctx.stroke();
+
+ // 내부 발광
+ ctx.strokeStyle="#e92d5e";
+ ctx.lineWidth=13;
+
+ ctx.beginPath();
+ ctx.moveTo(-25,-39);
+ ctx.quadraticCurveTo(35,0,-25,39);
+ ctx.stroke();
+
+ // 밝은 중심선
+ ctx.strokeStyle="#ffb2c2";
+ ctx.lineWidth=3;
+
+ ctx.beginPath();
+ ctx.moveTo(-22,-35);
+ ctx.quadraticCurveTo(27,0,-22,35);
+ ctx.stroke();
+
+ // 중심부의 어두운 저주
+ ctx.shadowBlur=0;
+ ctx.fillStyle="#240615aa";
+
+ ctx.beginPath();
+ ctx.ellipse(-8,0,13,20,0,0,Math.PI*2);
+ ctx.fill();
+
+ ctx.restore();
+}
+
+function drawProjectiles(){
+ for(const p of projectiles){
+  if(p.alive)drawMoonProjectile(p);
+ }
+}
+
+function drawEffects(){
+
+ for(const p of particles){
+
+  const alpha=Math.max(0,p.life/p.maxLife);
+
+  ctx.save();
+  ctx.globalAlpha=alpha;
+  ctx.strokeStyle=p.color;
+  ctx.fillStyle=p.color;
+
+  if(p.ring){
+
+   const progress=1-alpha;
+   const radius=p.size+progress*p.growth;
+
+   ctx.lineWidth=3;
+   ctx.beginPath();
+   ctx.arc(p.x,p.y,radius,0,Math.PI*2);
+   ctx.stroke();
+
+  }else{
+
+   ctx.beginPath();
+   ctx.arc(p.x,p.y,p.size*alpha,0,Math.PI*2);
+   ctx.fill();
+  }
+
+  ctx.restore();
+ }
+}
+
+function drawHP(x,hp,color,reverse){
+
+ ctx.fillStyle="#454b58";
+ ctx.fillRect(x,36,400,19);
+
+ const width=400*hp/100;
+
+ ctx.fillStyle=color;
+
+ ctx.fillRect(
+  reverse?x+400-width:x,
+  36,width,19
+ );
+
+ ctx.strokeStyle="#ffffff66";
+ ctx.strokeRect(x,36,400,19);
+}
+
+function drawUI(){
+
+ drawHP(45,player.hp,"#579dff",false);
+ drawHP(515,cpu.hp,"#ef6473",true);
+
+ ctx.fillStyle="white";
+ ctx.font="bold 17px Arial";
+
+ ctx.textAlign="left";
+ ctx.fillText("NOX",45,27);
+
+ ctx.textAlign="right";
+ ctx.fillText("CPU",915,27);
+
+ ctx.textAlign="center";
+ ctx.font="bold 15px Arial";
+ ctx.fillText("PROJECT FIGHTER",480,45);
+
+ // 잔월 쿨다운 표시
+ const cooldown=player.moonCooldown;
+
+ ctx.font="bold 13px Arial";
+ ctx.fillStyle=cooldown>0?"#ff9aad":"#ffffff";
+
+ ctx.fillText(
+  cooldown>0
+   ?"AFTERMOON · "+cooldown.toFixed(1)+"s"
+   :"AFTERMOON READY",
+  480,
+  76
+ );
+
+ if(gameOver){
+
+  ctx.fillStyle="#000b";
+  ctx.fillRect(0,0,W,H);
+
+  ctx.fillStyle="white";
+  ctx.font="bold 52px Arial";
+  ctx.fillText(winner,480,240);
+
+  ctx.font="20px Arial";
+  ctx.fillText("PRESS RESTART",480,280);
+ }
+}
+
+function draw(){
+
+ ctx.setTransform(
+  canvas.width/W,0,
+  0,canvas.height/H,
+  0,0
+ );
+
+ ctx.clearRect(0,0,W,H);
+
+ ctx.save();
+
+ if(shake>0){
+  ctx.translate(
+   random(-shake,shake),
+   random(-shake,shake)
+  );
+ }
+
+ drawBackground();
+ drawFighter(player);
+ drawFighter(cpu);
+ drawProjectiles();
+ drawEffects();
+
+ ctx.restore();
+
+ if(impactFlash>0){
+
+  ctx.fillStyle=
+   "rgba(255,225,230,"+
+   Math.min(impactFlash*.7,.09)+")";
+
+  ctx.fillRect(0,0,W,H);
+ }
+
+ drawUI();
+}
+
+// =====================================
+// 게임 루프
+// =====================================
+
+let lastTime=performance.now();
+
+function loop(now){
+
+ const dt=Math.min(
+  (now-lastTime)/1000,
+  .033
+ );
+
+ lastTime=now;
+
+ update(dt);
+ draw();
+
+ requestAnimationFrame(loop);
+}
+
+document.getElementById("restart").onclick=resetGame;
+
+resetGame();
+requestAnimationFrame(loop);
+
+</script>
+</body>
+</html>
